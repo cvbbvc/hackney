@@ -27,108 +27,213 @@
 
 -define(CHUNK_SIZE, 65536000). %% 64 MB is the default
 
-perform(Client0, {Method0, Path, Headers0, Body0}) ->
-  Method = hackney_bstr:to_upper(hackney_bstr:to_binary(Method0)),
-  
-  #client{options=Options} = Client0,
-  
-  DefaultHeaders0 =  [{<<"User-Agent">>, default_ua()}],
-  %% basic authorization handling
-  DefaultHeaders = case proplists:get_value(basic_auth, Options) of
-                     undefined ->
-                       DefaultHeaders0;
-                     {User, Pwd} ->
-                       User1 = hackney_bstr:to_binary(User),
-                       Pwd1 = hackney_bstr:to_binary(Pwd),
-                       Credentials = base64:encode(<< User1/binary, ":", Pwd1/binary >>),
-                       DefaultHeaders0 ++ [{<<"Authorization">>,
-                         <<"Basic ", Credentials/binary>>}]
-                   end,
-  
-  %% add any cookies passed to options
-  Cookies = proplists:get_value(cookie, Options, []),
-  DefaultHeaders1 = maybe_add_cookies(Cookies, DefaultHeaders),
-  
-  HeadersDict0 = hackney_headers:update(hackney_headers:new(DefaultHeaders1),
-    Headers0),
-  
-  {HeadersDict, ReqType0} = req_type(HeadersDict0, Body0),
-  
-  HeadersDict1 = maybe_add_host(HeadersDict, Client0#client.netloc),
-  
-  Expect = expectation(HeadersDict),
-  
-  %% build headers with the body.
-  {HeaderDict2, ReqType, Body, Client1} = case Body0 of
-                                            stream ->
-                                              {HeadersDict1, ReqType0, stream, Client0};
-                                            stream_multipart ->
-                                              handle_multipart_body(HeadersDict1, ReqType0, Client0);
-                                            {stream_multipart, Size} ->
-                                              handle_multipart_body(HeadersDict1, ReqType0, Size, Client0);
-                                            {stream_multipart, Size, Boundary} ->
-                                              handle_multipart_body(HeadersDict1, ReqType0, Size,
-                                                Boundary, Client0);
-                                            <<>> when Method =:= <<"POST">> orelse Method =:= <<"PUT">> ->
-                                              handle_body(HeadersDict1, ReqType0, Body0, Client0);
-                                            <<>> ->
-                                              {HeadersDict1, ReqType0, Body0, Client0};
-                                            [] ->
-                                              {HeadersDict1, ReqType0, Body0, Client0};
-                                            _ ->
-                                              handle_body(HeadersDict1, ReqType0, Body0, Client0)
-                                          end,
-  
-  Client = case ReqType of
-             normal ->
-               Client1#client{send_fun=fun hackney_request:send/2,
-                 req_type=normal};
-             chunked ->
-               Client1#client{send_fun=fun hackney_request:send_chunk/2,
-                 req_type=chunked}
-           end,
-  
-  HeadersData = iolist_to_binary([
-    << Method/binary, " ", Path/binary, " HTTP/1.1", "\r\n" >>,
-    hackney_headers:to_binary(HeaderDict2)]),
-  
-  PerformAll = proplists:get_value(perform_all, Options, true),
-  
-  ?report_verbose("perform request", [{header_data, HeadersData},
-    {perform_all, PerformAll},
-    {expect, Expect}]),
-  
-  
-  case can_perform_all(Body, Expect, PerformAll) of
-    true ->
-      perform_all(Client, HeadersData, Body, Method, Path, Expect);
-    _ ->
-      case hackney_request:send(Client, HeadersData) of
-        ok when Body =:= stream ->
-          {ok, Client#client{response_state=stream, method=Method,
-            path=Path, expect=Expect}};
-        ok ->
-          case stream_body(Body, Client#client{expect=Expect}) of
-            {error, _Reason}=E ->
-              E;
-            {stop, Client2} ->
-              FinalClient = Client2#client{method=Method,
-                path=Path},
-              hackney_response:start_response(FinalClient);
-            {ok, Client2} ->
-              case end_stream_body(Client2) of
-                {ok, Client3} ->
-                  FinalClient = Client3#client{method=Method,
-                    path=Path},
-                  hackney_response:start_response(FinalClient);
-                Error ->
-                  Error
-              end
-          end;
-        Error ->
-          Error
-      end
-  end.
+perform(Client0, {Method0, Path, CmbdHeaders, Body0}) ->
+      case CmbdHeaders of
+        {Headers0, HeadersRaw} -> 
+            Method = hackney_bstr:to_upper(hackney_bstr:to_binary(Method0)),
+
+            #client{options=Options} = Client0,
+
+            DefaultHeaders0 =  [{<<"User-Agent">>, default_ua()}],
+            %% basic authorization handling
+            DefaultHeaders = case proplists:get_value(basic_auth, Options) of
+                                 undefined ->
+                                     DefaultHeaders0;
+                                 {User, Pwd} ->
+                                     User1 = hackney_bstr:to_binary(User),
+                                     Pwd1 = hackney_bstr:to_binary(Pwd),
+                                     Credentials = base64:encode(<< User1/binary, ":", Pwd1/binary >>),
+                                     DefaultHeaders0 ++ [{<<"Authorization">>,
+                                                          <<"Basic ", Credentials/binary>>}]
+                             end,
+
+            %% add any cookies passed ot options
+            Cookies = proplists:get_value(cookie, Options, []),
+            DefaultHeaders1 = maybe_add_cookies(Cookies, DefaultHeaders),
+
+            HeadersDict0 = hackney_headers:update(hackney_headers:new(DefaultHeaders1),
+                                                  Headers0),
+
+            {HeadersDict, ReqType0} = req_type(HeadersDict0, Body0),
+
+            HeadersDict1 = maybe_add_host(HeadersDict, Client0#client.netloc),
+
+            Expect = expectation(HeadersDict),
+
+            %% build headers with the body.
+            {HeaderDict2, ReqType, Body, Client1} = case Body0 of
+                                                        stream ->
+                                                            {HeadersDict1, ReqType0, stream, Client0};
+                                                        stream_multipart ->
+                                                            handle_multipart_body(HeadersDict1, ReqType0, Client0);
+                                                        {stream_multipart, Size} ->
+                                                            handle_multipart_body(HeadersDict1, ReqType0, Size, Client0);
+                                                        {stream_multipart, Size, Boundary} ->
+                                                            handle_multipart_body(HeadersDict1, ReqType0, Size,
+                                                                                  Boundary, Client0);
+                                                        <<>> when Method =:= <<"POST">> orelse Method =:= <<"PUT">> ->
+                                                            handle_body(HeadersDict1, ReqType0, Body0, Client0);
+                                                        <<>> ->
+                                                            {HeadersDict1, ReqType0, Body0, Client0};
+                                                        [] ->
+                                                            {HeadersDict1, ReqType0, Body0, Client0};
+                                                        _ ->
+                                                            handle_body(HeadersDict1, ReqType0, Body0, Client0)
+                                                    end,
+
+            Client = case ReqType of
+                         normal ->
+                             Client1#client{send_fun=fun hackney_request:send/2,
+                                            req_type=normal};
+                         chunked ->
+                             Client1#client{send_fun=fun hackney_request:send_chunk/2,
+                                            req_type=chunked}
+                     end,
+
+            HeadersData = iolist_to_binary([
+                                            << Method/binary, " ", Path/binary, " HTTP/1.1", "\r\n" >>,
+                                            HeadersRaw]),
+
+            PerformAll = proplists:get_value(perform_all, Options, true),
+
+            ?report_verbose("perform request", [{header_data, HeadersData},
+                                                {perform_all, PerformAll},
+                                                {expect, Expect}]),
+
+
+            case can_perform_all(Body, Expect, PerformAll) of
+                true ->
+                    perform_all(Client, HeadersData, Body, Method, Path, Expect);
+                _ ->
+                    case hackney_request:send(Client, HeadersData) of
+                        ok when Body =:= stream ->
+                            {ok, Client#client{response_state=stream, method=Method,
+                                               path=Path, expect=Expect}};
+                        ok ->
+                            case stream_body(Body, Client#client{expect=Expect}) of
+                                {error, _Reason}=E ->
+                                    E;
+                                {stop, Client2} ->
+                                    FinalClient = Client2#client{method=Method,
+                                                                 path=Path},
+                                    hackney_response:start_response(FinalClient);
+                                {ok, Client2} ->
+                                    case end_stream_body(Client2) of
+                                        {ok, Client3} ->
+                                            FinalClient = Client3#client{method=Method,
+                                                                         path=Path},
+                                            hackney_response:start_response(FinalClient);
+                                        Error ->
+                                            Error
+                                    end
+                            end;
+                        Error ->
+                            Error
+                    end
+            end;
+        Headers0 ->
+            Method = hackney_bstr:to_upper(hackney_bstr:to_binary(Method0)),
+
+            #client{options=Options} = Client0,
+
+            DefaultHeaders0 =  [{<<"User-Agent">>, default_ua()}],
+            %% basic authorization handling
+            DefaultHeaders = case proplists:get_value(basic_auth, Options) of
+                                 undefined ->
+                                     DefaultHeaders0;
+                                 {User, Pwd} ->
+                                     User1 = hackney_bstr:to_binary(User),
+                                     Pwd1 = hackney_bstr:to_binary(Pwd),
+                                     Credentials = base64:encode(<< User1/binary, ":", Pwd1/binary >>),
+                                     DefaultHeaders0 ++ [{<<"Authorization">>,
+                                                          <<"Basic ", Credentials/binary>>}]
+                             end,
+
+            %% add any cookies passed ot options
+            Cookies = proplists:get_value(cookie, Options, []),
+            DefaultHeaders1 = maybe_add_cookies(Cookies, DefaultHeaders),
+
+            HeadersDict0 = hackney_headers:update(hackney_headers:new(DefaultHeaders1),
+                                                  Headers0),
+
+            {HeadersDict, ReqType0} = req_type(HeadersDict0, Body0),
+
+            HeadersDict1 = maybe_add_host(HeadersDict, Client0#client.netloc),
+
+            Expect = expectation(HeadersDict),
+
+            %% build headers with the body.
+            {HeaderDict2, ReqType, Body, Client1} = case Body0 of
+                                                        stream ->
+                                                            {HeadersDict1, ReqType0, stream, Client0};
+                                                        stream_multipart ->
+                                                            handle_multipart_body(HeadersDict1, ReqType0, Client0);
+                                                        {stream_multipart, Size} ->
+                                                            handle_multipart_body(HeadersDict1, ReqType0, Size, Client0);
+                                                        {stream_multipart, Size, Boundary} ->
+                                                            handle_multipart_body(HeadersDict1, ReqType0, Size,
+                                                                                  Boundary, Client0);
+                                                        <<>> when Method =:= <<"POST">> orelse Method =:= <<"PUT">> ->
+                                                            handle_body(HeadersDict1, ReqType0, Body0, Client0);
+                                                        <<>> ->
+                                                            {HeadersDict1, ReqType0, Body0, Client0};
+                                                        [] ->
+                                                            {HeadersDict1, ReqType0, Body0, Client0};
+                                                        _ ->
+                                                            handle_body(HeadersDict1, ReqType0, Body0, Client0)
+                                                    end,
+
+            Client = case ReqType of
+                         normal ->
+                             Client1#client{send_fun=fun hackney_request:send/2,
+                                            req_type=normal};
+                         chunked ->
+                             Client1#client{send_fun=fun hackney_request:send_chunk/2,
+                                            req_type=chunked}
+                     end,
+
+            HeadersData = iolist_to_binary([
+                                            << Method/binary, " ", Path/binary, " HTTP/1.1", "\r\n" >>,
+                                            hackney_headers:to_binary(HeaderDict2)]),
+
+            PerformAll = proplists:get_value(perform_all, Options, true),
+
+            ?report_verbose("perform request", [{header_data, HeadersData},
+                                                {perform_all, PerformAll},
+                                                {expect, Expect}]),
+
+
+            case can_perform_all(Body, Expect, PerformAll) of
+                true ->
+                    perform_all(Client, HeadersData, Body, Method, Path, Expect);
+                _ ->
+                    case hackney_request:send(Client, HeadersData) of
+                        ok when Body =:= stream ->
+                            {ok, Client#client{response_state=stream, method=Method,
+                                               path=Path, expect=Expect}};
+                        ok ->
+                            case stream_body(Body, Client#client{expect=Expect}) of
+                                {error, _Reason}=E ->
+                                    E;
+                                {stop, Client2} ->
+                                    FinalClient = Client2#client{method=Method,
+                                                                 path=Path},
+                                    hackney_response:start_response(FinalClient);
+                                {ok, Client2} ->
+                                    case end_stream_body(Client2) of
+                                        {ok, Client3} ->
+                                            FinalClient = Client3#client{method=Method,
+                                                                         path=Path},
+                                            hackney_response:start_response(FinalClient);
+                                        Error ->
+                                            Error
+                                    end
+                            end;
+                        Error ->
+                            Error
+                    end
+            end
+    end.
 
 location(#client{location=Location}) when is_binary(Location) ->
   Location;
